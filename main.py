@@ -17,6 +17,10 @@ from src import datasets
 from src.utils import batch_detection_cropping
 from src.utils import data_splitting
 
+### Added (E.Noonan)
+import json
+###
+
 app = typer.Typer(pretty_exceptions_short=True, pretty_exceptions_show_locals=False)
 # %%
 @app.command()
@@ -33,7 +37,10 @@ def main(
         val:bool=False,
         test:bool=False,
         predict:bool=False,
-        predict_root:str=""
+        predict_root:str="",
+        ### Added (E.Noonan)
+        out_json: str = None
+        ###
     ):
     """
     Main function for training or evaluating a ResNet model (50 or 18) using PyTorch Lightning.
@@ -52,11 +59,19 @@ def main(
         val (bool): Validation mode flag.
         predict (bool): Prediction mode flag.
         predict_root (str): Root directory for prediction outputs.
+        out_json (str): Path to the output json file.
     """
 
     # GPU configuration: set up GPUs based on availability and user specification
-    gpus = gpus if torch.cuda.is_available() else None
-    gpus = [int(i) for i in gpus.split(',')]
+    ### commented out to be replaced (E. Noonan)
+    # gpus = gpus if torch.cuda.is_available() else None
+    # gpus = [int(i) for i in gpus.split(',')]
+
+    # replacement code:
+    use_gpu = torch.cuda.is_available() and gpus.lower() != 'cpu'
+    devices = [int(i) for i in gpus.split(',')] if use_gpu else 1
+
+    ###
 
     # Environment variable setup for numpy multi-threading. It is important to avoid cpu and ram issues.
     os.environ["OMP_NUM_THREADS"] = str(np_threads)
@@ -89,20 +104,24 @@ def main(
             data_splitting.create_splits(conf.split_path, conf.annotation_dir, conf.test_size, conf.val_size)
         else:
             raise ValueError('Invalid split type: {}. Available options: random, location, sequence.'.format(conf.split_type))
-        
-    if not conf.predict:
-        # Get the path to the annotation files, and we only want to do this if we are not predicting
-        if conf.test:
-            test_annotations = os.path.join(conf.dataset_root, 'test_annotations.csv')
-            # Crop test data (most likely we don't need this)
-            batch_detection_cropping.batch_detection_cropping(conf.dataset_root, os.path.join(conf.dataset_root, "cropped_resized"), test_annotations)
-        else:
-            train_annotations = os.path.join(conf.dataset_root, 'train_annotations.csv')
-            val_annotations = os.path.join(conf.dataset_root, 'val_annotations.csv')
-            # Crop training data
-            batch_detection_cropping.batch_detection_cropping(conf.dataset_root, os.path.join(conf.dataset_root, "cropped_resized"), train_annotations)
-            # Crop validation data
-            batch_detection_cropping.batch_detection_cropping(conf.dataset_root, os.path.join(conf.dataset_root, "cropped_resized"), val_annotations)
+
+    ### Added/Modified (E.Noonan)
+    if conf.get('do_cropping', False) and not conf.predict:
+        # indented original code:
+        if not conf.predict:
+            # Get the path to the annotation files, and we only want to do this if we are not predicting
+            if conf.test:
+                test_annotations = os.path.join(conf.dataset_root, 'test_annotations.csv')
+                # Crop test data (most likely we don't need this)
+                batch_detection_cropping.batch_detection_cropping(conf.dataset_root, os.path.join(conf.dataset_root, "cropped_resized"), test_annotations)
+            else:
+                train_annotations = os.path.join(conf.dataset_root, 'train_annotations.csv')
+                val_annotations = os.path.join(conf.dataset_root, 'val_annotations.csv')
+                # Crop training data
+                batch_detection_cropping.batch_detection_cropping(conf.dataset_root, os.path.join(conf.dataset_root, "cropped_resized"), train_annotations)
+                # Crop validation data
+                batch_detection_cropping.batch_detection_cropping(conf.dataset_root, os.path.join(conf.dataset_root, "cropped_resized"), val_annotations)
+    ###
 
     # Dataset and algorithm loading based on the configuration
     dataset = datasets.__dict__[conf.dataset_name](conf=conf)
@@ -145,6 +164,9 @@ def main(
     weights_folder = 'weights_dev' if dev else 'weights'
     checkpoint_callback = ModelCheckpoint(
         monitor='valid_mac_acc', mode='max', dirpath='./{}/{}/{}'.format(weights_folder, conf.log_dir, conf.algorithm),
+        ### added to compare last and top
+        save_last=True,
+        ###
         save_top_k=1, filename='{}-{}'.format(conf.conf_id, session) + '-{epoch:02d}-{valid_mac_acc:.2f}', verbose=True
     )
 
@@ -154,9 +176,13 @@ def main(
     trainer = pl.Trainer(
         max_epochs=conf.num_epochs,
         check_val_every_n_epoch=1, 
-        log_every_n_steps = conf.log_interval, 
-        accelerator='gpu',
-        devices=gpus,
+        log_every_n_steps = conf.log_interval,
+
+        ### modified to include cpu option (E. Noonan)
+        accelerator='gpu' if use_gpu else 'cpu',
+        devices=devices, # original value: gpus
+        ###
+
         logger=None if evaluate is not None else logger,
         callbacks=[lr_monitor, checkpoint_callback],
         strategy='auto',
@@ -170,7 +196,13 @@ def main(
         elif predict:
             trainer.predict(learner, dataloaders=[dataset.predict_dataloader()], ckpt_path=evaluate)
         elif test:
-            trainer.test(learner, dataloaders=[dataset.test_dataloader()], ckpt_path=evaluate)
+
+            ### Add saving of results to test mode
+            results = trainer.test(learner, dataloaders=[dataset.test_dataloader()], ckpt_path=evaluate)
+            if out_json:
+                json.dump(results, open(out_json, 'w'), indent = 2)
+            ###
+
         else:
             print('Invalid mode for evaluation.')
     else:

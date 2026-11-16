@@ -6,7 +6,8 @@ import pandas as pd
 import torch
 from PIL import Image
 from torchvision import transforms
-from torch.utils.data import Dataset, DataLoader
+### added WeightedRandomSampler for balanced training
+from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 import pytorch_lightning as pl
 
 # Exportable class names for external use
@@ -45,7 +46,27 @@ data_transforms = {
         transforms.Normalize(mean, std)
     ]),
 }
+### Added for balanced sampling
+def make_balanced_sampler(label_ids, target_per_class=None):
+    """
+    Draw a class-balanced sample each epoch (with replacement).
+    Minority classes are oversampled, majority classes undersampled.
+    Default target per class is the geometric mean of the class counts.
+    """
+    label_ids = np.asarray(label_ids)
+    classes, inverse, counts = np.unique(label_ids, return_inverse=True, return_counts=True)
 
+    if target_per_class is None:
+        target_per_class = int(np.exp(np.log(counts).mean()))
+
+    weights = torch.as_tensor((1.0 / counts)[inverse], dtype=torch.double)
+    num_samples = int(target_per_class) * len(classes)
+    print('Balanced sampling: {} per class, {} samples/epoch (natural counts: {})'
+          .format(target_per_class, num_samples, dict(zip(classes.tolist(), counts.tolist()))))
+    return WeightedRandomSampler(weights, num_samples=num_samples, replacement=True)
+
+
+###
 class Custom_Base_DS(Dataset):
     """
     Base dataset class for handling custom datasets.
@@ -200,15 +221,30 @@ class Custom_Base(pl.LightningDataModule):
 
         print('Datasets loaded.')
 
+### add modified train_dataloader to use sample balancing
     def train_dataloader(self):
         """
         Create a DataLoader for the training dataset.
-
-        Returns:
-            DataLoader: DataLoader for the training dataset.
+        Uses class-balanced sampling if conf.sampling == 'balanced'.
         """
-        return DataLoader(self.dset_tr, batch_size=self.conf.batch_size, shuffle=True, pin_memory=True, num_workers=self.conf.num_workers, drop_last=False)
+        if self.conf.get('sampling', 'none') == 'balanced':
+            sampler = make_balanced_sampler(self.dset_tr.label_ids, self.conf.get('target_per_class'))
+            return DataLoader(self.dset_tr, batch_size=self.conf.batch_size, sampler=sampler,
+                              pin_memory=True, num_workers=self.conf.num_workers, drop_last=False)
 
+        return DataLoader(self.dset_tr, batch_size=self.conf.batch_size, shuffle=True,
+                          pin_memory=True, num_workers=self.conf.num_workers, drop_last=False)
+
+### original code for train_dataloader
+    # def train_dataloader(self):
+    #     """
+    #     Create a DataLoader for the training dataset.
+    #
+    #     Returns:
+    #         DataLoader: DataLoader for the training dataset.
+    #     """
+    #     return DataLoader(self.dset_tr, batch_size=self.conf.batch_size, shuffle=True, pin_memory=True, num_workers=self.conf.num_workers, drop_last=False)
+###
     def val_dataloader(self):
         """
         Create a DataLoader for the validation dataset.
